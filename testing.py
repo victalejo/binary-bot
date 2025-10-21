@@ -1,196 +1,257 @@
+"""
+Testing/Trading Module for Binary Bot
+Handles real-time predictions and automated trading
+
+⚠️  WARNING: This module performs live trading with real money!
+Use with extreme caution and only with funds you can afford to lose.
+"""
+
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-from collections import deque
+import sys
+import logging
 import datetime
 import time
-from iq import fast_data,higher,lower,login
-from training import train_data
+from sklearn.preprocessing import MinMaxScaler
+from collections import deque
 import tensorflow as tf
-import sys
 
-gpus = tf.config.experimental.list_physical_devices('GPU')
+from iq import fast_data, higher, lower, login, get_balance
+from training import train_data, add_technical_indicators
+from config import (
+    SEQ_LEN, FUTURE_PERIOD_PREDICT, DEFAULT_PAIR, DEFAULT_BET_AMOUNT,
+    DEFAULT_MARTINGALE, MAX_BET_AMOUNT, MAX_MARTINGALE_STEPS,
+    MIN_CONFIDENCE, RETRAIN_INTERVAL, TRADING_SECOND, PREDICTION_SECOND,
+    STOCHASTIC_PERIOD, STOCHASTIC_SMOOTH, RSI_PERIOD,
+    MA_WINDOWS, EMA_WINDOWS, IQ_BALANCE_MODE, MODEL_DIR, validate_config
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Configure GPU
+gpus = tf.config.list_physical_devices('GPU')
 if gpus:
-  try:
-    # Currently, memory growth needs to be the same across GPUs
-    for gpu in gpus:
-      tf.config.experimental.set_memory_growth(gpu, True)
-    logical_gpus = tf.config.experimental.list_logical_devices('GPU')
-    print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
-  except RuntimeError as e:
-    # Memory growth must be set before GPUs have been initialized
-    print(e)
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        logical_gpus = tf.config.list_logical_devices('GPU')
+        logger.info(f"{len(gpus)} Physical GPUs, {len(logical_gpus)} Logical GPUs")
+    except RuntimeError as e:
+        logger.warning(f"GPU configuration error: {e}")
 
-def preprocess_prediciton(iq):
-    Actives = ['EURUSD','GBPUSD','EURJPY','AUDUSD']
-    active = 'EURUSD'
-    main = pd.DataFrame()
-    current = pd.DataFrame()
-    for active in Actives:
-        if active == 'EURUSD':
-            main = fast_data(iq,active).drop(columns = {'from','to'})
-        else:
-            current = fast_data(iq,active)
-            current = current.drop(columns = {'from','to','open','min','max'})
-            current.columns = [f'close_{active}',f'volume_{active}']
-            main = main.join(current)
-    
-    df = main
-    
+def preprocess_prediction(iq, pair: str = DEFAULT_PAIR):
     """
-    graphical analysis components
+    Preprocess data for prediction
+
+    Args:
+        iq: IQ_Option instance
+        pair: Trading pair to predict
+
+    Returns:
+        Preprocessed array ready for model prediction
     """
-    
-    df.isnull().sum().sum() # there are no nans
-    df.fillna(method="ffill", inplace=True)
-    df = df.loc[~df.index.duplicated(keep = 'first')]
-    
-    df['MA_20'] = df['close'].rolling(window = 20).mean()
-    df['MA_50'] = df['close'].rolling(window = 50).mean()
-    
-    
-    df['L14'] = df['min'].rolling(window=14).min()
-    df['H14'] = df['max'].rolling(window=14).max()
-    df['%K'] = 100*((df['close'] - df['L14']) / (df['H14'] - df['L14']) )
-    df['%D'] = df['%K'].rolling(window=3).mean()
-    
-    df['EMA_20'] = df['close'].ewm(span = 20, adjust = False).mean()
-    df['EMA_50'] = df['close'].ewm(span = 50, adjust = False).mean()
-    
-    rsi_period = 14 
-    chg = df['close'].diff(1)
-    gain = chg.mask(chg<0,0)
-    df['gain'] = gain
-    loss = chg.mask(chg>0,0)
-    df['loss'] = loss
-    avg_gain = gain.ewm(com = rsi_period - 1, min_periods = rsi_period).mean()
-    avg_loss = loss.ewm(com = rsi_period - 1, min_periods = rsi_period).mean()
-    
-    df['avg_gain'] = avg_gain
-    df['avg_loss'] = avg_loss
-    rs = abs(avg_gain/avg_loss)
-    df['rsi'] = 100-(100/(1+rs))
-    
-    """
-    Finishing preprocessing
-    """
-    df = df.drop(columns = {'open','min','max','avg_gain','avg_loss','L14','H14','gain','loss'})
-    
-    df = df.dropna()
-    df = df.fillna(method="ffill")
-    df = df.dropna()
-    
-    df.sort_index(inplace = True)
-    
-    scaler = MinMaxScaler()
-    indexes = df.index
-    df_scaled = scaler.fit_transform(df)
-    
-    pred = pd.DataFrame(df_scaled,index = indexes)
+    from config import ACTIVE_PAIRS
 
-    sequential_data = []
-    prev_days = deque(maxlen = SEQ_LEN)            
-    
-    for i in pred.iloc[len(pred) -SEQ_LEN :len(pred)   , :].values:
-        prev_days.append([n for n in i[:]])
-        if len(prev_days) == SEQ_LEN:
-            sequential_data.append([np.array(prev_days)])
+    logger.debug(f"Preprocessing data for prediction on {pair}")
 
-    X = []
+    try:
+        # Fetch data for all active pairs
+        main = pd.DataFrame()
 
-    for seq in sequential_data:
-        X.append(seq)
-    
-    
-    return np.array(X)
+        for active in ACTIVE_PAIRS:
+            data = fast_data(iq, active)
 
-if(len(sys.argv) == 1):
-    martingale = 2
-    bet_money = 1
-    ratio = 'EURUSD'
-elif(len(sys.argv) != 4):
-    print("The correct pattern is: python testing.py EURUSD (or other currency) INITIAL_BET(value starting in 1$ MIN) MARTINGALE (your martingale ratio default = 2)")
-    print("\n\nEXAMPLE:\npython testing.py EURUSD 1 3")
-    exit(-1)
-else:
-    bet_money = sys.argv[2] #QUANTITY YOU WANT TO BET EACH TIME
-    ratio = sys.argv[1]
-    martingale = sys.argv[3]
-    
-SEQ_LEN = 5  # how long of a preceeding sequence to collect for RNN, if you modify here, remember to modify in the other files too
-FUTURE_PERIOD_PREDICT = 2  # how far into the future are we trying to predict , if you modify here, remember to modify in the other files too
+            if data is None or data.empty:
+                logger.warning(f"No data for {active}, skipping")
+                continue
 
-
-
-NAME = train_data() + '.model'
-model = tf.keras.models.load_model(f'models/{NAME}')
-
-iq = login()
-
-i = 0
-bid = True
-bets = []
-MONEY = 10000 
-trade = True
-
-
-while(1):
-    if i >= 10 and i % 2 == 0:
-        NAME = train_data() + '.model'
-        model = tf.keras.models.load_model(f'models/{NAME}')
-        i = 0
-    if datetime.datetime.now().second < 30 and i % 2 == 0: #GARANTE QUE ELE VAI APOSTAR NA SEGUNDA, POIS AQUI ELE JÁ PEGA OS DADOS DE UMA NA FRENTE,
-        time_taker = time.time()
-        pred_ready = preprocess_prediciton(iq)             #LOGO, ELE PRECISA DE TEMPO PRA ELABORAR A PREVISÃO ANTES DE ATINGIR OS 59 SEGUNDOS PRA ELE
-        pred_ready = pred_ready.reshape(1,SEQ_LEN,pred_ready.shape[3])      #FAZER A APOSTA, ENÃO ELE VAI TENTAR PREVER O VALOR DA TERCEIRA NA FRENTE
-        result = model.predict(pred_ready)
-        print('probability of PUT: ',result[0][0])
-        print('probability of CALL: ',result[0][1])
-        print(f'Time taken : {int(time.time()-time_taker)} seconds')
-        i = i + 1  
-
-    if datetime.datetime.now().second == 59 and i%2 == 1:
-        if result[0][0] > 0.5 :
-            print('PUT')
-            id = lower(iq,bet_money,ratio)
-            i = i + 1   
-            trade = True
-        elif result[0][0] < 0.5 :
-            print('CALL')
-            id = higher(iq,bet_money,ratio) 
-            i = i + 1
-            trade = True
-        else:
-            trade = False
-            i = i + 1
-
-        if trade:
-            time.sleep(2)
-            
-            #print(datetime.datetime.now().second)
-            
-            tempo = datetime.datetime.now().second
-            while(tempo != 1): #wait till 1 to see if win or lose
-                tempo = datetime.datetime.now().second
-                
-            #print(datetime.datetime.now().second)
-            betsies = iq.get_optioninfo_v2(1)
-            betsies = betsies['msg']['closed_options']
-            
-            for bt in betsies:
-                bets.append(bt['win'])
-            win = bets[-1:]
-            print(win)
-            if win == ['win']:
-                #print(f'Balance : {get_balance(iq)}')
-                bet_money = 1
-                
-            elif win == ['lose']:
-                #print(f'Balance : {get_balance(iq)}')
-                bet_money = bet_money * martingale # martingale V3
-                
+            if active == 'EURUSD':
+                main = data.drop(columns=['from', 'to'], errors='ignore')
             else:
-                #print(f'Balance : {get_balance(iq)}')
-                bets.append(0)
-            #print(bet_money)
-            
+                current = data.drop(columns=['from', 'to', 'open', 'min', 'max'], errors='ignore')
+                current.columns = [f'close_{active}', f'volume_{active}']
+                main = main.join(current)
+
+        if main.empty:
+            logger.error("No data available for prediction")
+            return None
+
+        df = main
+
+        # Clean data - FIXED: Using ffill() instead of fillna(method="ffill")
+        df = df.ffill()
+        df = df.loc[~df.index.duplicated(keep='first')]
+
+        # Add technical indicators (reusing function from training.py)
+        df = add_technical_indicators(df)
+
+        # Drop unnecessary columns
+        df = df.drop(columns=['open', 'min', 'max'], errors='ignore')
+
+        # Final cleaning
+        df = df.dropna()
+        df = df.ffill()
+        df = df.dropna()
+        df.sort_index(inplace=True)
+
+        # Scale features
+        scaler = MinMaxScaler()
+        indexes = df.index
+        df_scaled = scaler.fit_transform(df)
+        pred = pd.DataFrame(df_scaled, index=indexes)
+
+        # Create sequences for LSTM
+        sequential_data = []
+        prev_days = deque(maxlen=SEQ_LEN)
+
+        for i in pred.iloc[len(pred) - SEQ_LEN:len(pred), :].values:
+            prev_days.append([n for n in i[:]])
+            if len(prev_days) == SEQ_LEN:
+                sequential_data.append([np.array(prev_days)])
+
+        X = []
+        for seq in sequential_data:
+            X.append(seq)
+
+        result = np.array(X)
+        logger.debug(f"Preprocessing complete. Shape: {result.shape}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in preprocess_prediction: {e}", exc_info=True)
+        return None
+
+def parse_arguments():
+    """Parse command line arguments with validation"""
+    if len(sys.argv) == 1:
+        return DEFAULT_PAIR, DEFAULT_BET_AMOUNT, DEFAULT_MARTINGALE
+    elif len(sys.argv) != 4:
+        print("=" * 70)
+        print("Binary Bot - Trading Module")
+        print("=" * 70)
+        print("\nUsage: python testing.py <PAIR> <INITIAL_BET> <MARTINGALE>")
+        print("\nArguments:")
+        print("  PAIR         - Trading pair (e.g., EURUSD, GBPUSD)")
+        print("  INITIAL_BET  - Initial bet amount in dollars (min: 1)")
+        print("  MARTINGALE   - Martingale multiplier (default: 2)")
+        print("\nExample:")
+        print("  python testing.py EURUSD 1 2")
+        print("\n⚠️  WARNING: Use PRACTICE mode first!")
+        print("=" * 70)
+        sys.exit(1)
+    else:
+        pair = sys.argv[1]
+        try:
+            bet_money = float(sys.argv[2])
+            martingale = float(sys.argv[3])
+            if bet_money < 1:
+                logger.error("Bet amount must be at least $1")
+                sys.exit(1)
+            if bet_money > MAX_BET_AMOUNT:
+                logger.error(f"Bet amount exceeds maximum: ${MAX_BET_AMOUNT}")
+                sys.exit(1)
+            if martingale < 1:
+                logger.error("Martingale multiplier must be at least 1")
+                sys.exit(1)
+            return pair, bet_money, martingale
+        except ValueError:
+            logger.error("Invalid numeric arguments")
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    logger.warning("=" * 70)
+    logger.warning("⚠️  BINARY BOT - AUTOMATED TRADING")
+    logger.warning("⚠️  Use at your own risk!")
+    logger.warning("=" * 70)
+
+    validate_config()
+    pair, initial_bet, martingale = parse_arguments()
+    logger.info(f"Trading: {pair}, Bet: ${initial_bet}, Martingale: {martingale}x")
+
+    logger.info("Training initial model...")
+    model_filename = train_data()
+    if not model_filename:
+        logger.error("Training failed")
+        sys.exit(1)
+
+    model = tf.keras.models.load_model(f"{MODEL_DIR}/{model_filename}.model")
+    iq = login()
+    if not iq:
+        sys.exit(1)
+
+    balance = get_balance(iq)
+    logger.info(f"Balance: ${balance}")
+
+    iteration, bet_money, consecutive_losses, bets, result = 0, initial_bet, 0, [], None
+
+    try:
+        while True:
+            if iteration >= RETRAIN_INTERVAL and iteration % 2 == 0:
+                model_filename = train_data()
+                if model_filename:
+                    model = tf.keras.models.load_model(f"{MODEL_DIR}/{model_filename}.model")
+                iteration = 0
+
+            current_second = datetime.datetime.now().second
+            if current_second < PREDICTION_SECOND and iteration % 2 == 0:
+                pred_ready = preprocess_prediction(iq, pair)
+                if pred_ready is None:
+                    iteration += 1
+                    continue
+                pred_ready = pred_ready.reshape(1, SEQ_LEN, pred_ready.shape[3])
+                result = model.predict(pred_ready, verbose=0)
+                logger.info(f"PUT: {result[0][0]:.4f}, CALL: {result[0][1]:.4f}")
+                iteration += 1
+
+            if current_second == TRADING_SECOND and iteration % 2 == 1:
+                if result is None:
+                    iteration += 1
+                    continue
+
+                if bet_money > MAX_BET_AMOUNT:
+                    bet_money, consecutive_losses = initial_bet, 0
+                if consecutive_losses >= MAX_MARTINGALE_STEPS:
+                    bet_money, consecutive_losses = initial_bet, 0
+
+                order_id = None
+                if result[0][0] > MIN_CONFIDENCE and result[0][0] > result[0][1]:
+                    logger.info(f"PUT ${bet_money}")
+                    order_id = lower(iq, bet_money, pair)
+                elif result[0][1] > MIN_CONFIDENCE:
+                    logger.info(f"CALL ${bet_money}")
+                    order_id = higher(iq, bet_money, pair)
+
+                iteration += 1
+
+                if order_id:
+                    time.sleep(2)
+                    while datetime.datetime.now().second != 1:
+                        time.sleep(0.1)
+                    try:
+                        opts = iq.get_optioninfo_v2(1).get('msg', {}).get('closed_options', [])
+                        for opt in opts:
+                            if opt.get('win'):
+                                bets.append(opt['win'])
+                        if bets:
+                            last = bets[-1]
+                            logger.info(f"Result: {last}")
+                            if last == 'win':
+                                bet_money, consecutive_losses = initial_bet, 0
+                            elif last == 'lose':
+                                consecutive_losses += 1
+                                bet_money *= martingale
+                            logger.info(f"Balance: ${get_balance(iq)}")
+                    except Exception as e:
+                        logger.error(f"Error: {e}")
+
+            time.sleep(0.5)
+
+    except KeyboardInterrupt:
+        logger.info(f"\nFinal balance: ${get_balance(iq)}, Trades: {len(bets)}")
+        sys.exit(0)
