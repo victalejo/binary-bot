@@ -122,7 +122,7 @@ FUTURE_PERIOD_PREDICT = 2  # how far into the future are we trying to predict , 
 
 
 
-NAME = train_data() + '.model'
+NAME = train_data() + '.keras'
 model = tf.keras.models.load_model(f'models/{NAME}')
 
 iq = login()
@@ -136,7 +136,7 @@ trade = True
 
 while(1):
     if i >= 10 and i % 2 == 0:
-        NAME = train_data() + '.model'
+        NAME = train_data() + '.keras'
         model = tf.keras.models.load_model(f'models/{NAME}')
         i = 0
     if datetime.datetime.now().second < 30 and i % 2 == 0: #GARANTE QUE ELE VAI APOSTAR NA SEGUNDA, POIS AQUI ELE JÁ PEGA OS DADOS DE UMA NA FRENTE,

@@ -217,7 +217,7 @@ def train_data():
     
     
     filepath = "LSTM-best"  # unique file name that will include the epoch and the validation acc for that epoch
-    checkpoint = ModelCheckpoint("models/{}.model".format(filepath), monitor='val_accuracy', verbose=1, save_best_only=True, mode='max') # saves only the best ones
+    checkpoint = ModelCheckpoint("models/{}.keras".format(filepath), monitor='val_accuracy', verbose=1, save_best_only=True, mode='max') # saves only the best ones
     
     # Train model
     history = model.fit(
