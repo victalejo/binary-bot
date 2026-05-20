@@ -32,7 +32,7 @@ def classify(current,future):
         return 0
 
 def preprocess_df(df):
-    df = df.drop("future", 1) 
+    df = df.drop("future", axis=1)
     
     from sklearn.preprocessing import MinMaxScaler
     scaler = MinMaxScaler()
@@ -204,7 +204,7 @@ def train_data():
     model.add(Dense(2, activation='softmax'))
     
     
-    opt = tf.keras.optimizers.Adam(lr=LEARNING_RATE, decay=5e-5)
+    opt = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
     
     # Compile model
     model.compile(
@@ -217,7 +217,7 @@ def train_data():
     
     
     filepath = "LSTM-best"  # unique file name that will include the epoch and the validation acc for that epoch
-    checkpoint = ModelCheckpoint("models/{}.model".format(filepath), monitor='val_acc', verbose=1, save_best_only=True, mode='max') # saves only the best ones
+    checkpoint = ModelCheckpoint("models/{}.model".format(filepath), monitor='val_accuracy', verbose=1, save_best_only=True, mode='max') # saves only the best ones
     
     # Train model
     history = model.fit(

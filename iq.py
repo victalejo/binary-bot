@@ -89,7 +89,7 @@ def get_data_needed(iq): #function to gather all the data
         for candle in current:
             useful_frame = pd.DataFrame(list(candle.values()),index = list(candle.keys())).T.drop(columns = ['at'])
             useful_frame = useful_frame.set_index(useful_frame['id']).drop(columns = ['id'])
-            main = main.append(useful_frame)
+            main = pd.concat([main, useful_frame])
             main.drop_duplicates()
         if active == 'EURUSD':
             final_data = main.drop(columns = {'from','to'})
@@ -108,7 +108,7 @@ def fast_data(iq,ratio): #function to gather reduced data for the testing
     for candle in candles:
         useful_frame = pd.DataFrame(list(candle.values()),index = list(candle.keys())).T.drop(columns = ['at'])
         useful_frame = useful_frame.set_index(useful_frame['id']).drop(columns = ['id'])
-        main = main.append(useful_frame)
+        main = pd.concat([main, useful_frame])
     return main
     
 def get_balance(iq):
